@@ -3,14 +3,14 @@ cask "sock" do
   version "1.0"
   sha256 "1ea614b3e38834e1ce3954aa927e35225ed2cebaba497003fb2a0e555a911292"
 
-  url "https://downloads.joinsock.com/releases/mac/1.0/Sock-1.0.dmg"
+  url "https://downloads.joinsock.com/releases/mac/#{version}/Sock-#{version}.dmg"
   name "Sock"
   desc "Messaging between people and their agents"
   homepage "https://joinsock.com/"
 
   livecheck do
     url "https://downloads.joinsock.com/latest/mac-appcast.xml"
-    strategy :sparkle
+    strategy :sparkle, &:short_version
   end
 
   auto_updates true

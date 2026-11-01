@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for scripts/update.sh against fake manifests served over file://.
+# Tests for scripts/update.sh against fake manifests and tag tarballs served over file://.
 set -u
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -15,12 +15,12 @@ manifest() { # dir platform version file sha
     "$2" "$3" "$4" "$2" "$3" "$4" "$5" >"$1/latest/$2.json"
 }
 
-binaries() { # dir prefix fileprefix version
-  local n=1 p
-  for p in darwin-arm64 darwin-amd64 linux-arm64 linux-amd64; do
-    manifest "$1" "$2-$p" "$4" "$3-$p.tar.gz" "$(sha "$n")"
-    n=$((n + 1))
-  done
+tarball() { # dir repo version: a fake GitHub tag tarball, prints its sha256
+  local d=$1/$2/archive/refs/tags
+  mkdir -p "$d" "$work/src/$2-$3"
+  echo "$2 $3" >"$work/src/$2-$3/README"
+  tar -czf "$d/v$3.tar.gz" -C "$work/src" "$2-$3"
+  shasum -a 256 "$d/v$3.tar.gz" | cut -d' ' -f1
 }
 
 newtap() { # fresh tap copy, prints its path
@@ -45,21 +45,20 @@ check_ruby() {
 
 # formula sock
 srv=$work/srv1
-binaries "$srv" cli sock 0.3.0
+want=$(tarball "$srv" sock-cli 0.3.0)
 tap=$(newtap)
-if DOWNLOADS_URL="file://$srv" "$tap/scripts/update.sh" formula sock; then
+if GITHUB_ARCHIVE_URL="file://$srv" "$tap/scripts/update.sh" formula sock 0.3.0; then
   f=$tap/Formula/sock.rb
   if [ -f "$f" ]; then
     contains "$f" 'class Sock < Formula' "formula sock"
-    contains "$f" 'version "0.3.0"' "formula sock"
-    contains "$f" 'url "https://downloads.example/releases/cli-darwin-arm64/0.3.0/sock-darwin-arm64.tar.gz"' "formula sock"
-    contains "$f" "sha256 \"$(sha 4)\"" "formula sock"
-    contains "$f" 'on_macos do' "formula sock"
-    contains "$f" 'on_linux do' "formula sock"
-    contains "$f" 'on_arm do' "formula sock"
-    contains "$f" 'on_intel do' "formula sock"
-    contains "$f" 'bin.install "sock"' "formula sock"
+    contains "$f" 'url "https://github.com/Aeryx-ai/sock-cli/archive/refs/tags/v0.3.0.tar.gz"' "formula sock"
+    contains "$f" "sha256 \"$want\"" "formula sock"
+    contains "$f" 'license "MIT"' "formula sock"
+    contains "$f" 'head "https://github.com/Aeryx-ai/sock-cli.git", branch: "main"' "formula sock"
+    contains "$f" 'depends_on "go" => :build' "formula sock"
+    contains "$f" 'system "go", "build", *std_go_args(ldflags: "-s -w -X main.version=#{version}"), "./cmd/sock"' "formula sock"
     contains "$f" '--version' "formula sock"
+    ! grep -q 'on_macos\|bin.install\|downloads.joinsock' "$f" || fail "formula sock: binary leftovers"
     check_ruby "$f"
     [ "$(find "$tap" -type f ! -path "$tap/scripts/*" | wc -l | tr -d ' ')" = 1 ] || fail "formula sock wrote more than one file"
     pass "formula sock"
@@ -72,14 +71,16 @@ fi
 
 # formula sock-mcp
 srv=$work/srv2
-binaries "$srv" mcp sock-mcp 1.2.3
+want=$(tarball "$srv" sock-mcp 1.2.3)
 tap=$(newtap)
-if DOWNLOADS_URL="file://$srv" "$tap/scripts/update.sh" formula sock-mcp; then
+if GITHUB_ARCHIVE_URL="file://$srv" "$tap/scripts/update.sh" formula sock-mcp 1.2.3; then
   f=$tap/Formula/sock-mcp.rb
   contains "$f" 'class SockMcp < Formula' "formula sock-mcp"
-  contains "$f" 'version "1.2.3"' "formula sock-mcp"
-  contains "$f" 'url "https://downloads.example/releases/mcp-linux-amd64/1.2.3/sock-mcp-linux-amd64.tar.gz"' "formula sock-mcp"
-  contains "$f" 'bin.install "sock-mcp"' "formula sock-mcp"
+  contains "$f" 'url "https://github.com/Aeryx-ai/sock-mcp/archive/refs/tags/v1.2.3.tar.gz"' "formula sock-mcp"
+  contains "$f" "sha256 \"$want\"" "formula sock-mcp"
+  contains "$f" 'head "https://github.com/Aeryx-ai/sock-mcp.git", branch: "main"' "formula sock-mcp"
+  contains "$f" '"./cmd/sock-mcp"' "formula sock-mcp"
+  contains "$f" 'outbound-only' "formula sock-mcp"
   check_ruby "$f"
   pass "formula sock-mcp"
 else
@@ -106,20 +107,28 @@ else
   fail "cask sock: exit $?"
 fi
 
-# missing manifest: one platform absent, nothing written, existing file untouched
-srv=$work/srv4
-binaries "$srv" cli sock 0.3.0
-rm "$srv/latest/cli-linux-arm64.json"
+# missing tarball: nothing written, existing file untouched
 tap=$(newtap)
 mkdir -p "$tap/Formula"
 echo keep >"$tap/Formula/sock.rb"
-if DOWNLOADS_URL="file://$srv" "$tap/scripts/update.sh" formula sock 2>/dev/null; then
-  fail "missing manifest: exited 0"
+if GITHUB_ARCHIVE_URL="file://$work/nowhere" "$tap/scripts/update.sh" formula sock 0.3.0 2>/dev/null; then
+  fail "missing tarball: exited 0"
 elif [ "$(cat "$tap/Formula/sock.rb")" != keep ]; then
-  fail "missing manifest: overwrote formula"
+  fail "missing tarball: overwrote formula"
 else
-  pass "missing manifest"
+  pass "missing tarball"
 fi
+
+# missing or bad formula version is refused before any download
+srv=$work/srv1
+for v in "" v0.3.0 0.3 0.3.0-rc1 latest; do
+  tap=$(newtap)
+  if GITHUB_ARCHIVE_URL="file://$srv" "$tap/scripts/update.sh" formula sock ${v:+"$v"} 2>/dev/null || [ -e "$tap/Formula/sock.rb" ]; then
+    fail "bad version [$v]"
+  else
+    pass "bad version [$v]"
+  fi
+done
 
 # missing mac manifest
 tap=$(newtap)
@@ -127,17 +136,6 @@ if DOWNLOADS_URL="file://$work/nowhere" "$tap/scripts/update.sh" cask sock 2>/de
   fail "missing mac manifest"
 else
   pass "missing mac manifest"
-fi
-
-# version mismatch across platforms
-srv=$work/srv5
-binaries "$srv" cli sock 0.3.0
-manifest "$srv" cli-linux-amd64 0.3.1 sock-linux-amd64.tar.gz "$(sha 7)"
-tap=$(newtap)
-if DOWNLOADS_URL="file://$srv" "$tap/scripts/update.sh" formula sock 2>/dev/null || [ -e "$tap/Formula/sock.rb" ]; then
-  fail "version mismatch"
-else
-  pass "version mismatch"
 fi
 
 # malformed sha256 is refused
@@ -152,7 +150,7 @@ fi
 
 # unknown target is refused
 tap=$(newtap)
-if "$tap/scripts/update.sh" formula nope 2>/dev/null; then
+if "$tap/scripts/update.sh" formula nope 1.0.0 2>/dev/null; then
   fail "unknown target"
 else
   pass "unknown target"
